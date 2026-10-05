@@ -196,3 +196,66 @@ exports.uploadService = {
             isComplete: missingChunkNumbers.length === 0
         };
     },
+    async finalizeUpload(uploadId, ownerId) {
+        const session = await dynamoService_1.dynamoService.getUploadSession(uploadId);
+        if (!session) {
+            throw new Error(`Upload session ${uploadId} not found`);
+        }
+        if (session.ownerId !== ownerId) {
+            throw new Error('Unauthorized access to upload session');
+        }
+        const file = await dynamoService_1.dynamoService.getFile(session.fileId);
+        if (!file) {
+            throw new Error(`File ${session.fileId} not found`);
+        }
+        // Idempotency: If session is already complete, return success
+        if (session.status === 'complete' && file.status === 'complete') {
+            return {
+                fileId: file.fileId,
+                s3Key: file.s3Key,
+                status: file.status,
+                fileName: file.fileName,
+                sizeBytes: file.sizeBytes,
+                message: 'Upload session already finalized (idempotent).'
+            };
+        }
+        // Check chunk completion status in DynamoDB
+        const chunks = await dynamoService_1.dynamoService.getChunksForUpload(uploadId);
+        const incompleteChunks = chunks.filter(c => c.status !== 'complete');
+        if (incompleteChunks.length > 0 || chunks.length < session.totalChunks) {
+            const missingChunkNums = [];
+            for (let i = 1; i <= session.totalChunks; i++) {
+                const found = chunks.find(c => c.chunkNumber === i && c.status === 'complete');
+                if (!found)
+                    missingChunkNums.push(i);
+            }
+            throw new Error(`Cannot finalize upload ${uploadId}. Missing or incomplete chunks: [${missingChunkNums.join(', ')}]`);
+        }
+        // Sort chunk parts by chunk number (PartNumber)
+        const sortedParts = chunks
+            .sort((a, b) => a.chunkNumber - b.chunkNumber)
+            .map(c => ({
+            PartNumber: c.chunkNumber,
+            ETag: c.etag
+        }));
+        // Update session status to finalizing
+        await dynamoService_1.dynamoService.updateSessionStatus(uploadId, 'finalizing');
+        // Call S3 CompleteMultipartUpload
+        await s3Service_1.s3Service.completeMultipartUpload(file.s3Key, uploadId, sortedParts);
+        // Update statuses to complete
+        await dynamoService_1.dynamoService.updateSessionStatus(uploadId, 'complete');
+        await dynamoService_1.dynamoService.updateFileStatus(file.fileId, 'complete');
+        // Confirm Quota
+        await quotaService_1.quotaService.confirmQuota(ownerId, file.sizeBytes);
+        logger_1.logger.info('Upload finalized successfully', { uploadId, fileId: file.fileId, s3Key: file.s3Key });
+        return {
+            fileId: file.fileId,
+            s3Key: file.s3Key,
+            status: 'complete',
+            fileName: file.fileName,
+            sizeBytes: file.sizeBytes,
+            message: 'Multipart upload finalized successfully.'
+        };
+    }
+};
+//# sourceMappingURL=uploadService.js.map
