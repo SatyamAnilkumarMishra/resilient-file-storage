@@ -82,3 +82,83 @@ exports.uploadService = {
                 chunkNumber,
                 url
             })));
+        }
+        await Promise.all(chunkPromises);
+        const chunkUrls = await Promise.all(presignedUrlPromises);
+        logger_1.logger.info('Upload session initiated successfully', {
+            uploadId,
+            fileId,
+            ownerId,
+            totalChunks,
+            sizeBytes
+        });
+        return {
+            deduplicated: false,
+            uploadId,
+            fileId,
+            totalChunks,
+            chunkSizeBytes: chunkSize,
+            expiresAt,
+            chunkUrls
+        };
+    },
+    async getPresignedPartUrl(uploadId, chunkNumber, ownerId) {
+        const session = await dynamoService_1.dynamoService.getUploadSession(uploadId);
+        if (!session) {
+            throw new Error(`Upload session ${uploadId} not found`);
+        }
+        if (session.ownerId !== ownerId) {
+            throw new Error('Unauthorized access to upload session');
+        }
+        if (chunkNumber < 1 || chunkNumber > session.totalChunks) {
+            throw new Error(`Invalid chunk number ${chunkNumber}. Session has ${session.totalChunks} total chunks.`);
+        }
+        const file = await dynamoService_1.dynamoService.getFile(session.fileId);
+        if (!file) {
+            throw new Error(`Associated file ${session.fileId} not found`);
+        }
+        return await s3Service_1.s3Service.generatePresignedPartUrl(file.s3Key, uploadId, chunkNumber);
+    },
+    async confirmChunkUpload(uploadId, chunkNumber, etag, ownerId) {
+        if (!etag) {
+            throw new Error('ETag parameter is required to confirm chunk completion');
+        }
+        const session = await dynamoService_1.dynamoService.getUploadSession(uploadId);
+        if (!session) {
+            throw new Error(`Upload session ${uploadId} not found`);
+        }
+        if (session.ownerId !== ownerId) {
+            throw new Error('Unauthorized access to upload session');
+        }
+        const chunks = await dynamoService_1.dynamoService.getChunksForUpload(uploadId);
+        const existingChunk = chunks.find(c => c.chunkNumber === chunkNumber);
+        // Idempotency check: If chunk is already completed with exact same ETag, return success!
+        if (existingChunk && existingChunk.status === 'complete' && existingChunk.etag === etag) {
+            logger_1.logger.info('Idempotent chunk confirmation received (already complete)', {
+                uploadId,
+                chunkNumber,
+                etag
+            });
+            return {
+                uploadId,
+                chunkNumber,
+                status: 'complete',
+                etag,
+                idempotent: true
+            };
+        }
+        // Confirm chunk completion in DynamoDB
+        await dynamoService_1.dynamoService.confirmChunk(uploadId, chunkNumber, etag);
+        logger_1.logger.info('Chunk confirmed successfully', {
+            uploadId,
+            chunkNumber,
+            etag
+        });
+        return {
+            uploadId,
+            chunkNumber,
+            status: 'complete',
+            etag,
+            idempotent: false
+        };
+    },
