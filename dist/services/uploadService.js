@@ -162,3 +162,37 @@ exports.uploadService = {
             idempotent: false
         };
     },
+    async getUploadStatus(uploadId, ownerId) {
+        const session = await dynamoService_1.dynamoService.getUploadSession(uploadId);
+        if (!session) {
+            throw new Error(`Upload session ${uploadId} not found`);
+        }
+        if (session.ownerId !== ownerId) {
+            throw new Error('Unauthorized access to upload session');
+        }
+        const chunks = await dynamoService_1.dynamoService.getChunksForUpload(uploadId);
+        const completedChunkNumbers = [];
+        const missingChunkNumbers = [];
+        for (let i = 1; i <= session.totalChunks; i++) {
+            const chunk = chunks.find(c => c.chunkNumber === i);
+            if (chunk && chunk.status === 'complete') {
+                completedChunkNumbers.push(i);
+            }
+            else {
+                missingChunkNumbers.push(i);
+            }
+        }
+        const completedChunks = completedChunkNumbers.length;
+        const progressPercent = Math.round((completedChunks / session.totalChunks) * 100);
+        return {
+            uploadId,
+            fileId: session.fileId,
+            status: session.status,
+            totalChunks: session.totalChunks,
+            completedChunks,
+            completedChunkNumbers,
+            missingChunkNumbers,
+            progressPercent,
+            isComplete: missingChunkNumbers.length === 0
+        };
+    },
