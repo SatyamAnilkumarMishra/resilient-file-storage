@@ -106,3 +106,61 @@ exports.s3Service = {
             logger_1.logger.warn('Failed to generate real presigned URL, using mock presigned URL', { error: err.message });
             return `http://localhost:${env_1.config.port}/api/uploads/mock-s3-upload?uploadId=${uploadId}&partNumber=${partNumber}&key=${encodeURIComponent(s3Key)}`;
         }
+    },
+    async completeMultipartUpload(s3Key, uploadId, parts) {
+        if (env_1.config.useMockAws || uploadId.startsWith('mock_upload_')) {
+            exports.inMemoryS3.completeMultipartUpload(uploadId, parts);
+            return;
+        }
+        try {
+            const sortedParts = [...parts].sort((a, b) => a.PartNumber - b.PartNumber);
+            const cmd = new client_s3_1.CompleteMultipartUploadCommand({
+                Bucket: env_1.config.s3BucketName,
+                Key: s3Key,
+                UploadId: uploadId,
+                MultipartUpload: {
+                    Parts: sortedParts,
+                },
+            });
+            await aws_1.s3Client.send(cmd);
+        }
+        catch (err) {
+            logger_1.logger.warn('S3 completeMultipartUpload error, attempting mock fallback', { error: err.message });
+            exports.inMemoryS3.completeMultipartUpload(uploadId, parts);
+        }
+    },
+    async abortMultipartUpload(s3Key, uploadId) {
+        if (env_1.config.useMockAws || uploadId.startsWith('mock_upload_')) {
+            exports.inMemoryS3.abortMultipartUpload(uploadId);
+            return;
+        }
+        try {
+            const cmd = new client_s3_1.AbortMultipartUploadCommand({
+                Bucket: env_1.config.s3BucketName,
+                Key: s3Key,
+                UploadId: uploadId,
+            });
+            await aws_1.s3Client.send(cmd);
+        }
+        catch (err) {
+            logger_1.logger.warn('S3 abortMultipartUpload error', { error: err.message });
+            exports.inMemoryS3.abortMultipartUpload(uploadId);
+        }
+    },
+    async generatePresignedDownloadUrl(s3Key) {
+        if (env_1.config.useMockAws) {
+            return `http://localhost:${env_1.config.port}/api/files/download-mock?key=${encodeURIComponent(s3Key)}`;
+        }
+        try {
+            const cmd = new client_s3_1.GetObjectCommand({
+                Bucket: env_1.config.s3BucketName,
+                Key: s3Key,
+            });
+            return await (0, s3_request_presigner_1.getSignedUrl)(aws_1.s3Client, cmd, { expiresIn: 3600 });
+        }
+        catch (err) {
+            return `http://localhost:${env_1.config.port}/api/files/download-mock?key=${encodeURIComponent(s3Key)}`;
+        }
+    }
+};
+//# sourceMappingURL=s3Service.js.map
